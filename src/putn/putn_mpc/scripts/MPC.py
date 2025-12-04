@@ -9,7 +9,7 @@ def MPC(self_state, goal_state, obstacles):
     T = 0.2
     N = 10  # MPC horizon
     v_max = 0.5
-    omega_max = 0.6
+    omega_max = 0.4
     safe_distance = 0.55
     # Significantly increased angle weight (Q[2,2]) to prioritize orientation
     Q = np.array([[1.2, 0.0, 0.0],[0.0, 1.2, 0.0],[0.0, 0.0, 20.0]])
@@ -48,7 +48,8 @@ def MPC(self_state, goal_state, obstacles):
 
     # Admissable Control constraints
     # Allow slight backward motion to prevent deadlock when close to target but misaligned
-    opti.subject_to(opti.bounded(-0.1, v, v_max)) 
+    # For plant bot, restrict backward motion significantly as it only has front lidar
+    opti.subject_to(opti.bounded(-0.05, v, v_max)) # Restrict negative velocity to almost zero
     opti.subject_to(opti.bounded(-omega_max, omega, omega_max)) 
 
     # System Model constraints
@@ -146,8 +147,26 @@ def MPC(self_state, goal_state, obstacles):
         sol = opti.solve()
         u_res = sol.value(opt_controls)
         state_res = sol.value(opt_states)
+        try:
+            # Log throttled MPC output
+            MPC.__dict__.setdefault('_log_counter', 0)
+            MPC._log_counter += 1
+            if MPC._log_counter % 20 == 0:
+                # Check for pure rotation status
+                v_cmd = u_res[0,0]
+                w_cmd = u_res[0,1]
+                print(f"[MPC] v={v_cmd:.3f}, w={w_cmd:.3f}, dist={dist_to_goal:.3f}, ang_boost={ang_boost:.2f}")
+        except Exception:
+            pass
     except:
         state_res = np.repeat(self_state[:3],N+1,axis=0)
         u_res = np.zeros([N,2])
+        try:
+            MPC.__dict__.setdefault('_err_counter', 0)
+            MPC._err_counter += 1
+            if MPC._err_counter % 50 == 0:
+                print("[MPC] solve_failed, return zeros")
+        except Exception:
+            pass
 
     return state_res, u_res

@@ -100,6 +100,23 @@ class Local_Planner(Node):
 
     def __replan_cb(self):
         if self.robot_state_set and self.ref_path_set:
+            # Check if we have reached the goal
+            size = self.desired_global_path[1]
+            if size > 0:
+                dist_to_end = self.distance_global(self.curr_state, self.desired_global_path[0][size-1])
+                final_yaw = self.desired_global_path[0][size-1, 3]
+                yaw_diff = abs(self.curr_state[2] - final_yaw)
+                while yaw_diff > np.pi: yaw_diff -= 2*np.pi
+                while yaw_diff < -np.pi: yaw_diff += 2*np.pi
+                yaw_diff = abs(yaw_diff)
+                
+                if dist_to_end < 0.15 and yaw_diff < 0.1:
+                    if self.times % 50 == 0:
+                        self.get_logger().info(f"[local_planner] Goal reached! dist={dist_to_end:.3f}, yaw_err={yaw_diff:.3f}. Stop MPC.")
+                    # Publish zero velocity
+                    self.__publish_stop_command()
+                    return
+
             target = []
             self.choose_goal_state()        ##  gobal planning
             dist = 1
@@ -123,7 +140,29 @@ class Local_Planner(Node):
             pass
         
 
+    def __publish_stop_command(self):
+        local_path = Path()
+        local_plan = Float32MultiArray()
+        local_path.header.stamp = self.get_clock().now().to_msg()
+        local_path.header.frame_id = "world"
+        
+        # Fill with current state for visualization
+        for i in range(self.N):
+            pose = PoseStamped()
+            pose.header = local_path.header
+            pose.pose.position.x = self.curr_state[0]
+            pose.pose.position.y = self.curr_state[1]
+            pose.pose.position.z = self.z
+            local_path.poses.append(pose)
+            local_plan.data.append(0.0) # v
+            local_plan.data.append(0.0) # w
+            
+        self.__pub_local_path.publish(local_path)
+        self.__pub_local_plan.publish(local_plan)
+        
+
     def __publish_local_plan(self,input_sol,state_sol):
+        self.times = self.times + 1
         local_path = Path()
         local_plan = Float32MultiArray()
         local_path.header.stamp = self.get_clock().now().to_msg()
@@ -138,7 +177,11 @@ class Local_Planner(Node):
         while dth < -np.pi: dth += 2*np.pi
         
         target_yaw = self.goal_state[0, 3]
-        # self.get_logger().info(f"Curr: ({self.curr_state[0]:.2f}, {self.curr_state[1]:.2f}, {self.curr_state[2]:.2f}) Goal: ({self.goal_state[0,0]:.2f}, {self.goal_state[0,1]:.2f}, {target_yaw:.2f}) Error(Goal-Curr): {dth:.3f} rad")
+        if self.times % 20 == 0:
+             # Get the closest path index (approx)
+             num = self.find_min_distance(self.curr_state)
+             total_size = self.desired_global_path[1]
+             self.get_logger().info(f"Curr: ({self.curr_state[0]:.2f}, {self.curr_state[1]:.2f}, {self.curr_state[2]:.2f}) Goal: ({self.goal_state[0,0]:.2f}, {self.goal_state[0,1]:.2f}, {target_yaw:.2f}) Error(Goal-Curr): {dth:.3f} rad. PathIdx: {num}/{total_size}")
 
         for i in range(self.N):
             this_pose_stamped = PoseStamped()
@@ -155,8 +198,8 @@ class Local_Planner(Node):
         self.__pub_local_path.publish(local_path)
         self.__pub_local_plan.publish(local_plan)
         try:
-            # self.get_logger().info(f"[local_planner] publish local_plan first=({local_plan.data[0]:.3f},{local_plan.data[1]:.3f})")
-            pass
+            if self.times % 20 == 0:
+                self.get_logger().info(f"[local_planner] pub local_plan: v={local_plan.data[0]:.3f}, w={local_plan.data[1]:.3f}")
         except Exception:
             pass
 
@@ -171,6 +214,71 @@ class Local_Planner(Node):
 
     def choose_goal_state(self):
         num = self.find_min_distance(self.curr_state)
+        
+        # 1. Check if path is behind the vehicle
+        # Get direction vector of the path at current closest point
+        size = self.desired_global_path[1]
+        path_dx = 0.0
+        path_dy = 0.0
+        
+        if num < size - 1:
+             path_dx = self.desired_global_path[0][num+1, 0] - self.desired_global_path[0][num, 0]
+             path_dy = self.desired_global_path[0][num+1, 1] - self.desired_global_path[0][num, 1]
+        elif num > 0:
+             path_dx = self.desired_global_path[0][num, 0] - self.desired_global_path[0][num-1, 0]
+             path_dy = self.desired_global_path[0][num, 1] - self.desired_global_path[0][num-1, 1]
+             
+        # Get vector from robot to path point
+        robot_to_path_x = self.desired_global_path[0][num, 0] - self.curr_state[0]
+        robot_to_path_y = self.desired_global_path[0][num, 1] - self.curr_state[1]
+        
+        # Robot heading vector
+        heading_x = np.cos(self.curr_state[2])
+        heading_y = np.sin(self.curr_state[2])
+        
+        # Check if path is behind (dot product of heading and robot_to_path)
+        # Actually we care if the *path direction* is generally behind us, or if the *next point* is behind
+        # A robust check: Is the nearest point behind us?
+        # dot < 0 means point is behind
+        dot_prod = heading_x * robot_to_path_x + heading_y * robot_to_path_y
+        
+        # Also check orientation difference
+        path_yaw = np.arctan2(path_dy, path_dx)
+        yaw_diff = path_yaw - self.curr_state[2]
+        while yaw_diff > np.pi: yaw_diff -= 2*np.pi
+        while yaw_diff < -np.pi: yaw_diff += 2*np.pi
+        
+        is_behind = dot_prod < -0.3 # Point is significantly behind (>10cm projected)
+        large_angle_error = abs(yaw_diff) > np.pi/4 # > 45 degrees misalignment
+        
+        # If path is behind and we are misaligned, force in-place rotation
+        # We do this by setting the goal to be at current position but with desired yaw
+        # Constraint: Do NOT trigger if we are very close to the final goal (e.g., within 1m)
+        dist_to_final = 1e9
+        if size > 0:
+            dist_to_final = self.distance_global(self.curr_state, self.desired_global_path[0][size-1])
+
+        if (is_behind or large_angle_error) and dist_to_final > 0.3:
+             if self.times % 20 == 0:
+                 self.get_logger().info(f"Path behind ({dot_prod:.2f}) & misaligned ({yaw_diff:.2f}). Rotating in place.")
+             
+             # Set a special flag to indicate rotation mode
+             self.is_end = 0 # Ensure we are not "ended"
+             
+             # Force N steps to be current position + target yaw
+             for k in range(self.N):
+                 self.goal_state[k, 0] = self.curr_state[0]
+                 self.goal_state[k, 1] = self.curr_state[1]
+                 self.goal_state[k, 2] = path_yaw # Rotate to face path direction
+                 self.goal_state[k, 3] = path_yaw # Use path yaw as target
+             return
+        else:
+            if self.times % 20 == 0 and is_behind:
+                if dist_to_final <= 0.5:
+                    self.get_logger().info(f"Path behind ({dot_prod:.2f}) but NOT rotating: close to goal ({dist_to_final:.2f}m)")
+                else:
+                    self.get_logger().info(f"Path behind ({dot_prod:.2f}) but NOT rotating: misaligned ({yaw_diff:.2f}) < threshold")
+
         scale = 1
         num_list = []
         for i in range(self.N):  
@@ -218,7 +326,7 @@ class Local_Planner(Node):
         if(len(data.data)!=0):
             self.ref_path_set = True
             size = len(data.data)//3
-            self.get_logger().info(f"Received global path with {size} points")
+            self.get_logger().debug(f"Received global path with {size} points")
             self.desired_global_path[1]=size
             for i in range(size):
                 # Read data sequentially (Assuming input is Start -> Goal) from global_planning_node (stride 3)

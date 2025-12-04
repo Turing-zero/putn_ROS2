@@ -76,6 +76,13 @@ class Controller(Node):
         self.control_cmd.linear.x = float(data[0])
         self.control_cmd.angular.z = float(data[1])
         self.pub.publish(self.control_cmd)
+        try:
+            if not hasattr(self, '_cmd_log_counter'): self._cmd_log_counter = 0
+            self._cmd_log_counter += 1
+            if self._cmd_log_counter % 50 == 0:
+                 self.get_logger().info(f"[controller] pub /cmd_vel: v={self.control_cmd.linear.x:.3f}, w={self.control_cmd.angular.z:.3f}")
+        except Exception:
+            pass
 
     def getKey(self):
         try:
@@ -98,6 +105,40 @@ class Controller(Node):
     def auto_step(self):
         if self.have_plan:
             ref_inputs = self.local_plan[0]
+            
+            # Filter small negative velocities to zero (if not already handled by MPC)
+            if -0.01 < ref_inputs[0] < 0.0:
+                ref_inputs[0] = 0.0
+                
+            # Deadzone for actuators
+            # If command is too small, set to zero to avoid humming/stall
+            # But preserve direction for rotation if it's significant
+            # Logic updated per user request:
+            # 1. < 0.01 => 0.0
+            # 2. 0.01 <= val < 0.05 => 0.05 (boost to min executable)
+            
+            v_abs = abs(ref_inputs[0])
+            w_abs = abs(ref_inputs[1])
+            
+            if v_abs < 0.01:
+                ref_inputs[0] = 0.0
+            elif v_abs < 0.05:
+                ref_inputs[0] = math.copysign(0.05, ref_inputs[0])
+                
+            if w_abs < 0.01:
+                ref_inputs[1] = 0.0
+            elif w_abs < 0.05:
+                ref_inputs[1] = math.copysign(0.05, ref_inputs[1])
+            
+            # Log control command (throttled)
+            try:
+                if not hasattr(self, '_log_counter'): self._log_counter = 0
+                self._log_counter += 1
+                if self._log_counter % 50 == 0:
+                    self.get_logger().info(f"[controller] cmd: v={ref_inputs[0]:.3f}, w={ref_inputs[1]:.3f}")
+            except Exception:
+                pass
+
             self.cmd(ref_inputs)
         else:
             self.cmd(np.array([0.0, 0.0]))

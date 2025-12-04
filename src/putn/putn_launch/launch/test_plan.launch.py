@@ -19,7 +19,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='world_to_map',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'map']
+        arguments=['0', '0', '0', '0', '0', '0', 'world', 'global_map']
     )
 
     global_planning = Node(
@@ -29,7 +29,7 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file],
         remappings=[
-            ('map', '/test_map'),
+            ('map', '/multi_session/merged_map'),
             ('waypoints', '/waypoints'),
         ],
     )
@@ -55,7 +55,7 @@ def generate_launch_description():
         emulate_tty=True,
         remappings=[
             ('goal', '/goal'),
-            ('odom', '/odom')
+            ('odom', '/base_odom')
         ],
     )
 
@@ -148,14 +148,14 @@ def generate_launch_description():
         crop_min_y_arg,
         crop_max_y_arg,
         world_to_map,
-        pcd_publisher,
-        fake_odom,
+        # pcd_publisher,
+        # fake_odom,
         local_planner,
         controller,
         waypoint_gen,
         global_planning,
         # gpr_path,
-        rviz2,
+        # rviz2,
         rosbridge_node,
         rosapi_node,
         router_tsp,

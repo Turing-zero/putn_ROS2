@@ -181,7 +181,7 @@ void pubInterpolatedPath(const vector<Node*>& solution, rclcpp::Publisher<std_ms
   (*path_interpolation_pub)->publish(msg);
   
   if (!solution.empty()) {
-    ROS_INFO("Published interpolated path with %zu points. Triggering potential downstream effects.", msg.data.size()/3);
+    ROS_INFO_THROTTLE(50, "Published interpolated path with %zu points. Triggering potential downstream effects.", msg.data.size()/3);
   }
 }
 
